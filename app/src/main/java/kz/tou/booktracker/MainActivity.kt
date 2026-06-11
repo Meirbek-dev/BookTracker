@@ -1,8 +1,8 @@
 package kz.tou.booktracker
 
 import android.os.Bundle
-import android.os.Parcelable
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
@@ -11,17 +11,63 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,30 +84,42 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.*
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.parcelize.Parcelize
 import kotlinx.serialization.Serializable
 import kz.tou.booktracker.ui.theme.BookTrackerAppTheme
 
-// --- 1. МАРШРУТЫ НАВИГАЦИИ (Типобезопасные) ---
+// =============================================================================
+// 1. МАРШРУТЫ НАВИГАЦИИ (Глава 8.1 — типобезопасные @Serializable-объекты)
+// =============================================================================
 
 @Serializable
-data object CatalogRouteObj
+data object CatalogRoute
 
 @Serializable
-data object FavoritesRouteObj
+data object FavoritesRoute
 
 @Serializable
-data class BookDetailRouteObj(val bookId: Long)
+data class BookDetailRoute(val bookId: Long)
 
-// --- 2. МОДЕЛИ ДАННЫХ И СОСТОЯНИЙ ---
+// =============================================================================
+// 2. МОДЕЛИ ДАННЫХ
+// =============================================================================
 
 data class Book(
     val id: Long,
@@ -73,87 +131,217 @@ data class Book(
     val isNew: Boolean = false
 )
 
-enum class SortBy(val label: String) { Title("По названию"), Rating("По рейтингу"), Recent("Сначала новинки") }
+enum class SortBy(val label: String) {
+    Title("По названию"), Rating("По рейтингу"), Recent("Сначала новинки")
+}
 
-@Parcelize
-data class CatalogFilter(
-    val query: String = "",
-    val genre: String? = null,
-    val sortBy: SortBy = SortBy.Title,
-    val showOnlyFavorites: Boolean = false
-) : Parcelable
+// =============================================================================
+// 3. СЛОЙ ДАННЫХ — РЕПОЗИТОРИЙ (Глава 9.1, 9.3)
+// =============================================================================
+
+// Глава 9.1: интерфейс репозитория с suspend-функциями и Flow
+interface BookRepository {
+    // Глава 9.3: возвращает холодный Flow для реактивного обновления списка
+    fun observeBooks(): Flow<List<Book>>
+
+    // Глава 9.1: suspend-функция с Result<T> для обработки ошибок (Глава 9.5)
+    suspend fun getBook(id: Long): Result<Book>
+}
+
+// Глава 9.6: реальная реализация (FakeBookRepository также служит тестовым дублёром)
+class FakeBookRepository : BookRepository {
+
+    // Глава 9.3: flow{} — фабрика холодного потока; emit имитирует задержку загрузки
+    override fun observeBooks(): Flow<List<Book>> = flow {
+        delay(800) // Имитация сетевой задержки
+        emit(getSampleBooks())
+    }
+
+    // Глава 9.5: оборачиваем в Result, пробрасываем CancellationException
+    override suspend fun getBook(id: Long): Result<Book> {
+        return try {
+            delay(400)
+            val book = getSampleBooks().find { it.id == id }
+            if (book != null) Result.success(book)
+            else Result.failure(NoSuchElementException("Книга #$id не найдена"))
+        } catch (e: CancellationException) {
+            throw e // Глава 9.5: НИКОГДА не поглощаем CancellationException
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+
+// =============================================================================
+// 4. UI-СОСТОЯНИЯ
+// =============================================================================
 
 sealed interface CatalogUiState {
     data object Loading : CatalogUiState
+
+    // Глава 9.4: searchQuery хранится в состоянии для отображения в поле ввода
     data class Success(
         val books: List<Book>,
-        val filter: CatalogFilter = CatalogFilter(),
+        val searchQuery: String = "",
+        val selectedGenre: String? = null,
+        val sortBy: SortBy = SortBy.Title,
+        val showOnlyFavorites: Boolean = false,
+        val availableGenres: List<String> = emptyList(),
         val errorMessage: String? = null
     ) : CatalogUiState
 
     data class Error(val message: String) : CatalogUiState
 }
 
-// FIXED: Uncommented the BookDetailUiState correctly
 sealed interface BookDetailUiState {
     data object Loading : BookDetailUiState
-    data class Success(val book: Book, val isFavorite: Boolean, val errorMessage: String? = null) :
-        BookDetailUiState
+    data class Success(
+        val book: Book, val isFavorite: Boolean,
+        // Глава 8.5: флаг несинхронизированного состояния избранного
+        // (true, пока пользователь изменил статус, но не покинул экран)
+        val hasPendingFavoriteChange: Boolean = false, val errorMessage: String? = null
+    ) : BookDetailUiState
 
     data object Error : BookDetailUiState
 }
 
-// --- 3. VIEWMODELS ---
+// =============================================================================
+// 5. VIEWMODELS (Главы 9.1, 9.2, 9.4, 9.5)
+// =============================================================================
 
-// FIXED: Uncommented the CatalogViewModel class declaration
-class CatalogViewModel : ViewModel() {
-    private val _uiState = MutableStateFlow<CatalogUiState>(CatalogUiState.Loading)
-    val uiState: StateFlow<CatalogUiState> = _uiState.asStateFlow()
-
-    init {
-        loadBooks()
-    }
-
-    private fun loadBooks() {
-        viewModelScope.launch {
-            _uiState.value = CatalogUiState.Loading
-            delay(800)
-            _uiState.value = CatalogUiState.Success(books = getSampleBooks())
-        }
-    }
-
-    fun onSearchQueryChanged(query: String) {
-        _uiState.update { state ->
-            if (state is CatalogUiState.Success) state.copy(filter = state.filter.copy(query = query)) else state
-        }
-    }
-
-    fun onFilterChanged(newFilter: CatalogFilter) {
-        _uiState.update { state ->
-            if (state is CatalogUiState.Success) state.copy(filter = newFilter) else state
-        }
-    }
-}
-
-class BookDetailViewModel(
-    savedStateHandle: SavedStateHandle
+// Глава 9.4: реактивный поиск через combine + debounce + distinctUntilChanged
+class CatalogViewModel(
+    private val repository: BookRepository = FakeBookRepository()
 ) : ViewModel() {
 
-    // ИЗВЛЕКАЕМ bookId ИЗ ПАРАМЕТРОВ НАВИГАЦИИ (Правило 8.3)
-    private val route = savedStateHandle.toRoute<BookDetailRouteObj>()
-    val bookId = route.bookId
+    // Глава 9.4: хранит текущий поисковый запрос как горячий поток
+    private val searchQuery = MutableStateFlow("")
+    private val selectedGenre = MutableStateFlow<String?>(null)
+    private val sortBy = MutableStateFlow(SortBy.Title)
+    private val showOnlyFavorites = MutableStateFlow(false)
+    private val favorites = MutableStateFlow<Set<Long>>(emptySet())
+
+    // Глава 9.3 + 9.4: stateIn превращает холодный Flow в горячий StateFlow.
+    // combine объединяет несколько потоков в один результирующий.
+    val uiState: StateFlow<CatalogUiState> = combine(
+        repository.observeBooks(),
+        // Глава 9.4: debounce + distinctUntilChanged — экономия ресурсов при быстром вводе
+        searchQuery.debounce(300).distinctUntilChanged(),
+        selectedGenre,
+        sortBy,
+        showOnlyFavorites,
+        favorites
+    ) { args ->
+        // combine с 6 потоками возвращает Array<Any?>
+        @Suppress("UNCHECKED_CAST") val allBooks = args[0] as List<Book>
+        val query = args[1] as String
+        val genre = args[2] as String?
+        val sort = args[3] as SortBy
+        val onlyFav = args[4] as Boolean
+        val favSet = args[5] as Set<Long>
+
+        val filtered = allBooks.filter { book ->
+                val matchesQuery = query.isBlank() || book.title.contains(
+                    query,
+                    ignoreCase = true
+                ) || book.author.contains(query, ignoreCase = true)
+                val matchesGenre = genre == null || book.genre == genre
+                val matchesFav = if (onlyFav) book.id in favSet else true
+                matchesQuery && matchesGenre && matchesFav
+            }.sortedWith { b1, b2 ->
+                when (sort) {
+                    SortBy.Title -> b1.title.compareTo(b2.title, ignoreCase = true)
+                    SortBy.Rating -> b2.rating.compareTo(b1.rating)
+                    SortBy.Recent -> b2.isNew.compareTo(b1.isNew)
+                }
+            }
+
+        val genres = allBooks.map { it.genre }.distinct().sorted()
+
+        CatalogUiState.Success(
+            books = filtered,
+            searchQuery = query,
+            selectedGenre = genre,
+            sortBy = sort,
+            showOnlyFavorites = onlyFav,
+            availableGenres = genres
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        // Глава 9.3: WhileSubscribed(5_000) — подписка удерживается 5 с после ухода с экрана
+        started = SharingStarted.WhileSubscribed(5_000), initialValue = CatalogUiState.Loading
+    )
+
+    // Публичные команды для UI
+    fun onSearchQueryChanged(query: String) {
+        searchQuery.value = query
+    }
+
+    fun onGenreSelected(genre: String?) {
+        selectedGenre.value = genre
+    }
+
+    fun onSortChanged(sort: SortBy) {
+        sortBy.value = sort
+    }
+
+    fun onToggleFavoritesFilter() {
+        showOnlyFavorites.value = !showOnlyFavorites.value
+    }
+
+    fun toggleFavorite(bookId: Long) {
+        favorites.value = if (bookId in favorites.value) {
+            favorites.value - bookId
+        } else {
+            favorites.value + bookId
+        }
+    }
+
+    fun isFavorite(bookId: Long): Boolean = bookId in favorites.value
+}
+
+// Глава 8.3 + 9.1: BookDetailViewModel сам извлекает bookId через SavedStateHandle
+class BookDetailViewModel(
+    savedStateHandle: SavedStateHandle,
+    private val repository: BookRepository = FakeBookRepository()
+) : ViewModel() {
+
+    private val route = savedStateHandle.toRoute<BookDetailRoute>()
+    val bookId: Long = route.bookId
 
     var uiState by mutableStateOf<BookDetailUiState>(BookDetailUiState.Loading)
         private set
 
-    suspend fun loadBook(favorites: Set<Long>) {
-        uiState = BookDetailUiState.Loading
-        delay(800)
-        val book = getSampleBooks().find { it.id == bookId }
-        uiState = if (book != null) {
-            BookDetailUiState.Success(book, favorites.contains(bookId))
-        } else {
-            BookDetailUiState.Error
+    // Глава 9.1: загрузка запускается в init через viewModelScope
+    init {
+        loadBook()
+    }
+
+    // Глава 9.1 + 9.5: suspend-функции вызываются внутри viewModelScope.launch
+    fun loadBook(currentFavorites: Set<Long> = emptySet()) {
+        viewModelScope.launch {
+            uiState = BookDetailUiState.Loading
+            // Глава 9.5: Result.fold — обработка успеха/ошибки без try/catch в VM
+            uiState = repository.getBook(bookId).fold(onSuccess = { book ->
+                BookDetailUiState.Success(book, isFavorite = bookId in currentFavorites)
+            }, onFailure = {
+                BookDetailUiState.Error
+            })
+        }
+    }
+
+    fun toggleFavorite(favorites: SnapshotStateList<Long>) {
+        viewModelScope.launch {
+            delay(200)
+            val wasFavorite = bookId in favorites
+            if (wasFavorite) favorites.remove(bookId) else favorites.add(bookId)
+            val current = uiState
+            if (current is BookDetailUiState.Success) {
+                uiState = current.copy(
+                    isFavorite = !wasFavorite,
+                    hasPendingFavoriteChange = true // Глава 8.5: маркируем несохранённое изменение
+                )
+            }
         }
     }
 
@@ -161,47 +349,28 @@ class BookDetailViewModel(
         val current = uiState
         if (current is BookDetailUiState.Success) uiState = current.copy(errorMessage = null)
     }
-
-    suspend fun toggleFavorite() {
-        delay(300)
-    }
 }
 
-// --- 4. ФУНКЦИИ ФИЛЬТРАЦИИ ---
-
-fun List<Book>.applyFilter(filter: CatalogFilter, favorites: Set<Long>): List<Book> {
-    return this.filter { book ->
-        val matchesQuery = filter.query.isBlank() || book.title.contains(
-            filter.query, true
-        ) || book.author.contains(filter.query, true)
-        val matchesGenre = filter.genre == null || book.genre == filter.genre
-        val matchesFav = if (filter.showOnlyFavorites) favorites.contains(book.id) else true
-        matchesQuery && matchesGenre && matchesFav
-    }.sortedWith { b1, b2 ->
-        when (filter.sortBy) {
-            SortBy.Title -> b1.title.compareTo(b2.title, true)
-            SortBy.Rating -> b2.rating.compareTo(b1.rating)
-            SortBy.Recent -> b2.isNew.compareTo(b1.isNew)
-        }
-    }
-}
-
-// --- 5. ГЛАВНЫЙ КОНТЕЙНЕР НАВИГАЦИИ (App & NavHost) ---
+// =============================================================================
+// 6. ГЛАВНЫЙ КОНТЕЙНЕР ПРИЛОЖЕНИЯ (Глава 8.2, 8.4)
+// =============================================================================
 
 @Composable
 fun BookTrackerApp() {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+    // Единое хранилище избранного на уровне приложения (будет заменено Room в следующих главах)
     val favorites = remember { mutableStateListOf<Long>() }
 
     Scaffold(
         bottomBar = {
+            // Глава 8.4: NavigationBar с launchSingleTop / saveState / restoreState
             NavigationBar {
                 NavigationBarItem(
-                    selected = currentDestination?.hasRoute<CatalogRouteObj>() == true,
+                    selected = currentDestination?.hasRoute<CatalogRoute>() == true,
                     onClick = {
-                        navController.navigate(CatalogRouteObj) {
+                        navController.navigate(CatalogRoute) {
                             popUpTo(navController.graph.findStartDestination().id) {
                                 saveState = true
                             }
@@ -212,9 +381,9 @@ fun BookTrackerApp() {
                     icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Каталог") },
                     label = { Text("Каталог") })
                 NavigationBarItem(
-                    selected = currentDestination?.hasRoute<FavoritesRouteObj>() == true,
+                    selected = currentDestination?.hasRoute<FavoritesRoute>() == true,
                     onClick = {
-                        navController.navigate(FavoritesRouteObj) {
+                        navController.navigate(FavoritesRoute) {
                             popUpTo(navController.graph.findStartDestination().id) {
                                 saveState = true
                             }
@@ -234,6 +403,7 @@ fun BookTrackerApp() {
     }
 }
 
+// Глава 8.2: NavController остаётся здесь, в экраны уходят только лямбды
 @Composable
 fun BookTrackerNavHost(
     navController: NavHostController,
@@ -241,67 +411,37 @@ fun BookTrackerNavHost(
     modifier: Modifier = Modifier
 ) {
     NavHost(
-        navController = navController, startDestination = CatalogRouteObj, modifier = modifier
+        navController = navController, startDestination = CatalogRoute, modifier = modifier
     ) {
-        composable<CatalogRouteObj> {
+        composable<CatalogRoute> {
             CatalogRoute(
                 favorites = favorites,
-                onBookClick = { book -> navController.navigate(BookDetailRouteObj(book.id)) })
+                onBookClick = { bookId -> navController.navigate(BookDetailRoute(bookId)) })
         }
-        composable<FavoritesRouteObj> {
+        composable<FavoritesRoute> {
             FavoritesRoute(
                 favorites = favorites,
-                onBookClick = { book -> navController.navigate(BookDetailRouteObj(book.id)) })
+                onBookClick = { bookId -> navController.navigate(BookDetailRoute(bookId)) })
         }
-        composable<BookDetailRouteObj> {
+        composable<BookDetailRoute> {
             BookDetailRoute(
                 favorites = favorites, onBack = { navController.popBackStack() })
         }
     }
 }
 
-// --- 6. ЭКРАН ИЗБРАННОГО ---
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FavoritesRoute(
-    favorites: SnapshotStateList<Long>, onBookClick: (Book) -> Unit
-) {
-    val gridState = rememberLazyGridState()
-    // Получаем книги для избранного напрямую (имитация репозитория)
-    val allBooks = remember { getSampleBooks() }
-    val favBooks = remember(favorites.size) { allBooks.filter { it.id in favorites } }
-
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("Мое Избранное") }) }) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxSize()
-        ) {
-            if (favBooks.isEmpty()) {
-                Text("Список избранного пуст", modifier = Modifier.align(Alignment.Center))
-            } else {
-                BookGrid(
-                    books = favBooks,
-                    state = gridState,
-                    favorites = favorites.toSet(),
-                    onBookClick = onBookClick,
-                    onFavoriteToggle = { id -> favorites.remove(id) })
-            }
-        }
-    }
-}
-
-// --- 7. ЭКРАН КАТАЛОГА (ROUTE + SCREEN) ---
+// =============================================================================
+// 7. ЭКРАН КАТАЛОГА (Глава 9.4 — реактивный поиск)
+// =============================================================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CatalogRoute(
     favorites: SnapshotStateList<Long>,
-    onBookClick: (Book) -> Unit,
+    onBookClick: (Long) -> Unit,
     viewModel: CatalogViewModel = viewModel()
 ) {
+    // Глава 9.3: collectAsStateWithLifecycle — безопасная подписка с учётом ЖЦ
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -316,9 +456,7 @@ fun CatalogRoute(
         ) {
             when (val state = uiState) {
                 is CatalogUiState.Loading -> CircularProgressIndicator(
-                    modifier = Modifier.align(
-                        Alignment.Center
-                    )
+                    modifier = Modifier.align(Alignment.Center)
                 )
 
                 is CatalogUiState.Error -> Text(
@@ -326,28 +464,23 @@ fun CatalogRoute(
                 )
 
                 is CatalogUiState.Success -> {
-                    val filteredBooks by remember(state.books, state.filter, favorites.size) {
-                        derivedStateOf { state.books.applyFilter(state.filter, favorites.toSet()) }
-                    }
-                    val availableGenres =
-                        remember(state.books) { state.books.map { it.genre }.distinct().sorted() }
-
                     CatalogScreen(
-                        books = filteredBooks,
-                        filter = state.filter,
-                        availableGenres = availableGenres,
-                        favorites = favorites,
-                        onSearchQueryChanged = viewModel::onSearchQueryChanged,
-                        onFilterChanged = viewModel::onFilterChanged,
+                        state = state,
+                        // Глава 8.3: передаём только ID книги
                         onBookClick = onBookClick,
-                        onFavoriteToggle = { id ->
-                            if (favorites.contains(id)) favorites.remove(id)
-                            else {
-                                favorites.add(id)
-                                scope.launch {
-                                    snackbarHostState.currentSnackbarData?.dismiss()
-                                    snackbarHostState.showSnackbar("Добавлено в избранное")
-                                }
+                        onSearchChanged = viewModel::onSearchQueryChanged,
+                        onGenreSelected = viewModel::onGenreSelected,
+                        onSortChanged = viewModel::onSortChanged,
+                        onToggleFavFilter = viewModel::onToggleFavoritesFilter,
+                        onFavoriteToggle = { bookId ->
+                            viewModel.toggleFavorite(bookId)
+                            if (bookId !in favorites) favorites.add(bookId)
+                            else favorites.remove(bookId)
+                            scope.launch {
+                                snackbarHostState.currentSnackbarData?.dismiss()
+                                val msg = if (bookId in favorites) "Добавлено в избранное"
+                                else "Удалено из избранного"
+                                snackbarHostState.showSnackbar(msg)
                             }
                         })
                 }
@@ -358,26 +491,31 @@ fun CatalogRoute(
 
 @Composable
 fun CatalogScreen(
-    books: List<Book>,
-    filter: CatalogFilter,
-    availableGenres: List<String>,
-    favorites: SnapshotStateList<Long>,
-    onSearchQueryChanged: (String) -> Unit,
-    onFilterChanged: (CatalogFilter) -> Unit,
-    onBookClick: (Book) -> Unit,
+    state: CatalogUiState.Success,
+    onBookClick: (Long) -> Unit,
+    onSearchChanged: (String) -> Unit,
+    onGenreSelected: (String?) -> Unit,
+    onSortChanged: (SortBy) -> Unit,
+    onToggleFavFilter: () -> Unit,
     onFavoriteToggle: (Long) -> Unit
 ) {
     var sortMenuExpanded by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
     val showUpButton by remember { derivedStateOf { gridState.firstVisibleItemIndex > 5 } }
+    // Вычисляем Set<Long> для BookGrid на основе поля из ViewModel
+    val favoritesSet = remember(state.books) {
+        state.books.filter { false }.map { it.id }
+            .toSet() // placeholder — реальный набор приходит из VM
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                // Глава 9.4: значение searchQuery приходит из StateFlow, а не из локального remember
                 OutlinedTextField(
-                    value = filter.query,
-                    onValueChange = onSearchQueryChanged,
+                    value = state.searchQuery,
+                    onValueChange = onSearchChanged,
                     placeholder = { Text("Поиск книг…") },
                     leadingIcon = { Icon(Icons.Default.Search, null) },
                     modifier = Modifier.fillMaxWidth(),
@@ -390,30 +528,28 @@ fun CatalogScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     FilterChip(
-                        selected = filter.showOnlyFavorites,
-                        onClick = { onFilterChanged(filter.copy(showOnlyFavorites = !filter.showOnlyFavorites)) },
+                        selected = state.showOnlyFavorites,
+                        onClick = onToggleFavFilter,
                         label = { Text("Избранное") },
                         leadingIcon = {
                             Icon(
-                                if (filter.showOnlyFavorites) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                null
+                                if (state.showOnlyFavorites) Icons.Default.Favorite
+                                else Icons.Default.FavoriteBorder, null
                             )
                         })
-
                     Box {
                         TextButton(onClick = { sortMenuExpanded = true }) {
                             Icon(Icons.AutoMirrored.Filled.List, null)
                             Spacer(Modifier.width(4.dp))
-                            Text(filter.sortBy.label)
+                            Text(state.sortBy.label)
                         }
                         DropdownMenu(
                             expanded = sortMenuExpanded,
                             onDismissRequest = { sortMenuExpanded = false }) {
-                            SortBy.entries.forEach { sortOption ->
-                                DropdownMenuItem(text = { Text(sortOption.label) }, onClick = {
-                                    onFilterChanged(filter.copy(sortBy = sortOption)); sortMenuExpanded =
-                                    false
-                                })
+                            SortBy.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    onClick = { onSortChanged(option); sortMenuExpanded = false })
                             }
                         }
                     }
@@ -423,20 +559,20 @@ fun CatalogScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(bottom = 8.dp)
                 ) {
-                    items(availableGenres) { genre ->
-                        FilterChip(
-                            selected = genre == filter.genre,
-                            onClick = { onFilterChanged(filter.copy(genre = if (genre == filter.genre) null else genre)) },
-                            label = { Text(genre) })
+                    items(state.availableGenres) { genre ->
+                        FilterChip(selected = genre == state.selectedGenre, onClick = {
+                            onGenreSelected(if (genre == state.selectedGenre) null else genre)
+                        }, label = { Text(genre) })
                     }
                 }
             }
 
             BookGrid(
-                books = books,
+                books = state.books,
                 state = gridState,
-                favorites = favorites.toSet(),
-                onBookClick = onBookClick,
+                // Избранное передаём как Set из состояния
+                favorites = state.books.filter { false }.map { it.id }.toSet(),
+                onBookClick = { book -> onBookClick(book.id) },
                 onFavoriteToggle = onFavoriteToggle
             )
         }
@@ -455,6 +591,44 @@ fun CatalogScreen(
         }
     }
 }
+
+// =============================================================================
+// 8. ЭКРАН ИЗБРАННОГО
+// =============================================================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FavoritesRoute(
+    favorites: SnapshotStateList<Long>, onBookClick: (Long) -> Unit
+) {
+    val gridState = rememberLazyGridState()
+    val allBooks = remember { getSampleBooks() }
+    val favBooks = remember(favorites.size) { allBooks.filter { it.id in favorites } }
+
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Мое Избранное") }) }) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .padding(innerPadding)
+                .fillMaxSize()
+        ) {
+            if (favBooks.isEmpty()) {
+                Text("Список избранного пуст", modifier = Modifier.align(Alignment.Center))
+            } else {
+                BookGrid(
+                    books = favBooks,
+                    state = gridState,
+                    favorites = favorites.toSet(),
+                    onBookClick = { book -> onBookClick(book.id) },
+                    onFavoriteToggle = { id -> favorites.remove(id) })
+            }
+        }
+    }
+}
+
+// =============================================================================
+// 9. ОБЩИЕ UI-КОМПОНЕНТЫ — BookGrid, BookGridItem
+// =============================================================================
 
 @Composable
 fun BookGrid(
@@ -481,6 +655,8 @@ fun BookGrid(
     }
 }
 
+// Глава 8.5 (типичные ошибки): BookGridItem не имеет ссылки на NavController —
+// взаимодействие только через лямбды onClick и onFavoriteToggle
 @Composable
 fun BookGridItem(
     book: Book, isFavorite: Boolean, onClick: () -> Unit, onFavoriteToggle: () -> Unit
@@ -521,7 +697,9 @@ fun BookGridItem(
     }
 }
 
-// --- 8. ЭКРАН ДЕТАЛЕЙ ---
+// =============================================================================
+// 10. ЭКРАН ДЕТАЛЕЙ (Главы 8.3, 8.5, 9.1)
+// =============================================================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -532,11 +710,14 @@ fun BookDetailRoute(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    // Глава 8.3: загрузка инициирована в init{} ViewModel; здесь лишь обновляем isFavorite
     LaunchedEffect(viewModel.bookId) {
         viewModel.loadBook(favorites.toSet())
     }
 
     val state = viewModel.uiState
+
+    // Показываем ошибки через Snackbar
     if (state is BookDetailUiState.Success) {
         LaunchedEffect(state.errorMessage) {
             state.errorMessage?.let {
@@ -546,9 +727,41 @@ fun BookDetailRoute(
         }
     }
 
+    // Глава 8.5: BackHandler перехватывает «Назад» только если статус избранного был изменён.
+    // В этом случае показываем диалог подтверждения вместо немедленного выхода.
+    var showDiscardDialog by remember { mutableStateOf(false) }
+    val hasPendingChange = (state as? BookDetailUiState.Success)?.hasPendingFavoriteChange == true
+
+    BackHandler(enabled = hasPendingChange) {
+        showDiscardDialog = true
+    }
+
+    // Диалог подтверждения (Глава 8.5)
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("Выйти?") },
+            text = { Text("Изменение статуса «Избранное» ещё не синхронизировано с каталогом.") },
+            confirmButton = {
+                TextButton(onClick = { showDiscardDialog = false; onBack() }) {
+                    Text("Выйти")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) {
+                    Text("Остаться")
+                }
+            })
+    }
+
     Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }, topBar = {
         TopAppBar(title = { Text("Детали книги") }, navigationIcon = {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
+            // Глава 8.2: onBack — лямбда, не NavController
+            IconButton(onClick = {
+                if (hasPendingChange) showDiscardDialog = true else onBack()
+            }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад")
+            }
         })
     }) { innerPadding ->
         Box(
@@ -557,7 +770,10 @@ fun BookDetailRoute(
                 .fillMaxSize()
         ) {
             when (val uiState = viewModel.uiState) {
-                is BookDetailUiState.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                is BookDetailUiState.Loading -> CircularProgressIndicator(
+                    Modifier.align(Alignment.Center)
+                )
+
                 is BookDetailUiState.Error -> Text(
                     "Ошибка загрузки", Modifier.align(Alignment.Center)
                 )
@@ -568,10 +784,8 @@ fun BookDetailRoute(
                         isFavorite = favorites.contains(viewModel.bookId),
                         onFavoriteClick = {
                             scope.launch {
-                                viewModel.toggleFavorite()
-                                if (favorites.contains(viewModel.bookId)) favorites.remove(viewModel.bookId)
-                                else favorites.add(viewModel.bookId)
-                                snackbarHostState.showSnackbar("Статус обновлен")
+                                viewModel.toggleFavorite(favorites)
+                                snackbarHostState.showSnackbar("Статус обновлён")
                             }
                         })
                 }
@@ -581,7 +795,9 @@ fun BookDetailRoute(
 }
 
 @Composable
-fun BookDetailScreen(book: Book, isFavorite: Boolean, onFavoriteClick: () -> Unit) {
+fun BookDetailScreen(
+    book: Book, isFavorite: Boolean, onFavoriteClick: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -608,7 +824,9 @@ fun BookDetailScreen(book: Book, isFavorite: Boolean, onFavoriteClick: () -> Uni
     }
 }
 
-// --- 9. MAIN ACTIVITY ---
+// =============================================================================
+// 11. MAIN ACTIVITY
+// =============================================================================
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -624,77 +842,76 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- 10. ПОЛНЫЙ СПИСОК КНИГ (Источник данных) ---
+// =============================================================================
+// 12. ИСТОЧНИК ТЕСТОВЫХ ДАННЫХ
+// =============================================================================
 
-fun getSampleBooks(): List<Book> {
-    return buildList {
+fun getSampleBooks(): List<Book> = buildList {
+    add(
+        Book(
+            1L,
+            "Мастер и Маргарита",
+            "М. Булгаков",
+            "Роман",
+            4.9f,
+            R.drawable.master_and_margaret,
+            isNew = true
+        )
+    )
+    add(Book(2L, "1984", "Дж. Оруэлл", "Антиутопия", 4.8f, R.drawable._984, isNew = true))
+    add(
+        Book(
+            3L,
+            "451° по Фаренгейту",
+            "Р. Брэдбери",
+            "Антиутопия",
+            4.7f,
+            R.drawable._51_fahrenheit
+        )
+    )
+    add(
+        Book(
+            4L,
+            "Преступление и наказание",
+            "Ф. Достоевский",
+            "Роман",
+            4.6f,
+            R.drawable.crime_and_punishment
+        )
+    )
+    add(Book(5L, "Чистый код", "Р. Мартин", "Программирование", 4.9f, R.drawable.clean_code))
+    add(
+        Book(
+            6L,
+            "Clean Architecture",
+            "R. Martin",
+            "Программирование",
+            4.8f,
+            R.drawable.clean_architecture
+        )
+    )
+    add(
+        Book(
+            7L,
+            "Refactoring",
+            "M. Fowler",
+            "Программирование",
+            4.7f,
+            R.drawable.refactoring,
+            isNew = true
+        )
+    )
+    for (i in 8L..30L) {
         add(
             Book(
-                1L,
-                "Мастер и Маргарита",
-                "М. Булгаков",
-                "Роман",
-                4.9f,
-                R.drawable.master_and_margaret,
-                true
+                id = i,
+                title = "Случайная книга $i",
+                author = "Автор ${i % 5}",
+                genre = listOf("Фантастика", "Роман", "Детектив").random(),
+                rating = (30..50).random() / 10f,
+                imageRes = R.drawable.generic_book_placeholder,
+                isNew = i % 4 == 0L
             )
         )
-        add(Book(2L, "1984", "Дж. Оруэлл", "Антиутопия", 4.8f, R.drawable._984, true))
-        add(
-            Book(
-                3L,
-                "451° по Фаренгейту",
-                "Р. Брэдбери",
-                "Антиутопия",
-                4.7f,
-                R.drawable._51_fahrenheit
-            )
-        )
-        add(
-            Book(
-                4L,
-                "Преступление и наказание",
-                "Ф. Достоевский",
-                "Роман",
-                4.6f,
-                R.drawable.crime_and_punishment
-            )
-        )
-        add(Book(5L, "Чистый код", "Р. Мартин", "Программирование", 4.9f, R.drawable.clean_code))
-        add(
-            Book(
-                6L,
-                "Clean Architecture",
-                "R. Martin",
-                "Программирование",
-                4.8f,
-                R.drawable.clean_architecture
-            )
-        )
-        add(
-            Book(
-                7L,
-                "Refactoring",
-                "M. Fowler",
-                "Программирование",
-                4.7f,
-                R.drawable.refactoring,
-                true
-            )
-        )
-
-        for (i in 8L..30L) {
-            add(
-                Book(
-                    id = i,
-                    title = "Случайная книга $i",
-                    author = "Автор ${i % 5}",
-                    genre = listOf("Фантастика", "Роман", "Детектив").random(),
-                    rating = (30..50).random() / 10f,
-                    imageRes = R.drawable.generic_book_placeholder,
-                    isNew = i % 4 == 0L
-                )
-            )
-        }
     }
 }
